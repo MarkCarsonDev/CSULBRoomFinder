@@ -7,14 +7,25 @@ import asyncio
 from datetime import datetime
 import os
 import json
+import re
 
 
 # Load configuration from .env file
 config = dotenv_values(".env")
 
 # URL to scrape for course information
-url = "https://web.csulb.edu/depts/enrollment/registration/class_schedule/Spring_2024/By_Subject/"
-rooms = []
+course_schedule_url = "https://web.csulb.edu/depts/enrollment/registration/class_schedule/Spring_2024/By_Subject/"
+room_bookings = []
+
+WEEKDAY_ABBR = {
+    0: "M",
+    1: "Tu",
+    2: "W",
+    3: "Th",
+    4: "F",
+    5: "Sa",
+    6: "Su"
+}
 
 def parse_sections_table(table):
     """
@@ -39,11 +50,13 @@ def parse_sections_table(table):
 
         start_time, end_time = parse_times(section['TIME'])
 
-        formatted_section = {
-            "Location": section['LOCATION'],
-            "Start": start_time,
-            "End": end_time
-        }
+        for day in parse_days(section['DAYS']):
+            formatted_section = {
+                "Location": section['LOCATION'],
+                "Day": day,
+                "Start": start_time,
+                "End": end_time
+            }
 
         formatted.append(formatted_section)
 
@@ -89,6 +102,10 @@ def parse_times(time_str):
 
     return (start_time, end_time)
 
+def parse_days(days_str):
+    # split string by capital letters
+    return [day for day in re.findall('[A-Z][^A-Z]*', days_str)]
+
 async def get_page_html(url):
     """
     Asynchronously fetches course sections from a specified URL and processes the data.
@@ -127,21 +144,24 @@ def get_subjects(html):
     return hrefs
 
 class Room:
-    def __init__(self, location, booked_times):
+    def __init__(self, location, booked_times=None):
         self.location = location
-        self.booked_times = booked_times
+        # Ensure booked_times is a list of tuples, each tuple containing (day, (start, end))
+        self.booked_times = booked_times if booked_times is not None else []
 
-    def add_booked_time(self, time_tuple):
-        self.booked_times.append(time_tuple)
+    def add_booked_time(self, day, time_tuple):
+        # Now each booked_time is a tuple of (day, (start, end))
+        self.booked_times.append((day, time_tuple))
 
-    def __str__(self):
-        return f"{self.location}"
-    
-    def is_open(self, current_time):
-        for time in self.booked_times:
-            if time[0] <= current_time <= time[1] or time[0] <= current_time <= time[1]:
-                return False
+    def is_open(self, day, current_time):
+        for booked_day, (start, end) in self.booked_times:
+            if day == booked_day:
+                if start <= current_time <= end:
+                    return False
         return True
+    
+    def __str__(self):
+        return self.location
     
 def get_rooms(html):
     courses = html.find_all(lambda tag: tag.name == "div" and tag.get("class", []) == ["courseHeader"])
@@ -152,13 +172,13 @@ def get_rooms(html):
                 sections = parse_sections_table(sections_table)
                 for section in sections:
                     # check if room is already in rooms
-                    for room in rooms:
+                    for room in room_bookings:
                         if room.location == section['Location']:
-                            room.add_booked_time((section['Start'], section['End']))
+                            room.add_booked_time(section['Day'], (section['Start'], section['End']))
                             break
                     else:
-                        room = Room(section['Location'], [(section['Start'], section['End'])])
-                        rooms.append(room)
+                        room = Room(section['Location'], [(section['Day'], (section['Start'], section['End']))])
+                        room_bookings.append(room)
             
     
 async def main(filter = None):
@@ -167,16 +187,16 @@ async def main(filter = None):
     # Check if the rooms data file exists
     if not os.path.exists(rooms_data_file):
         print("Scraping rooms because no saved data file found...")
-        subjects_page = await get_page_html(url)
+        subjects_page = await get_page_html(course_schedule_url)
         subjects = get_subjects(subjects_page)
         for subject in subjects:
-            course_list = await get_page_html(url + subject)
+            course_list = await get_page_html(course_schedule_url + subject)
             get_rooms(course_list)
         
         # Save rooms data to file
         with open(rooms_data_file, 'w') as file:
             # Convert the rooms list of Room objects to a list of dicts for JSON serialization
-            rooms_dicts = [{'location': room.location, 'booked_times': room.booked_times} for room in rooms]
+            rooms_dicts = [{'location': room.location, 'booked_times': room.booked_times} for room in room_bookings]
             json.dump(rooms_dicts, file)
     else:
         print("Loading rooms from saved data file...")
@@ -184,36 +204,49 @@ async def main(filter = None):
         with open(rooms_data_file, 'r') as file:
             rooms_dicts = json.load(file)
             # Convert list of dicts back to list of Room objects
-            rooms.clear()  # Ensure rooms list is empty before loading
+            room_bookings.clear()  # Ensure rooms list is empty before loading
             for room_dict in rooms_dicts:
                 room = Room(room_dict['location'], room_dict['booked_times'])
-                rooms.append(room)
+                room_bookings.append(room)
 
 
     # get current time in 24 hour format
     current_time = int(time.strftime("%H%M"))
+    current_day = WEEKDAY_ABBR[datetime.now().weekday()]
 
 
-    print("Finding open rooms...")
+    print(f"Finding open rooms for {current_day} at {datetime.now().strftime('%-I:%M%p')}...")
     if filter:
         print(f"Filtering for locations containing '{filter.upper()}'...")
     open_rooms = []
-    for room in rooms:
-        if room.is_open(current_time):
+    for room in room_bookings:
+        if room.is_open(current_day, current_time):
             if filter:
                 if filter.lower() in room.location.lower():
                     open_rooms.append(room)
+            else:
+                open_rooms.append(room)
+
+    formatted_open_rooms = {}
 
     for room in open_rooms:
         # get the next time the room will be in use:
         last_start = 2400
-        for start, end in room.booked_times:
+        for day, (start, end) in room.booked_times:
             if start > current_time:
                 if start < last_start:
                     last_start = start
+        
+        formatted_open_rooms[room.location] = last_start
+        print(f"{room} until {datetime.strptime(str(last_start), '%H%M').strftime('%-I:%M%p').lower() if last_start != 2400 else 'the end of today'}")
 
-        print(f"{room} until {datetime.strptime(str(last_start), '%H%M').strftime('%-I%p').lower() if last_start != 2400 else 'indefinitely'}")
+    
+    max_value = max(formatted_open_rooms.values())
+
+    keys_with_max_value = [key for key, value in formatted_open_rooms.items() if value == max_value]
+
+    print(f"Best rooms (until {datetime.strptime(str(max_value), '%H%M').strftime('%-I:%M%p').lower() if max_value != 2400 else 'the end of today'}): ", keys_with_max_value)
     
 
 # Start the monitoring loop
-asyncio.run(main("hc"))
+asyncio.run(main('hc'))
