@@ -13,6 +13,17 @@ import re
 # Load configuration from .env file
 config = dotenv_values(".env")
 
+from discord.ext import commands
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+# Discord bot token and target user ID
+TOKEN = config["DISCORD_TOKEN"]
+TARGET_USER_ID = int(config["TARGET_USER_ID"])
+
+bot = commands.Bot(command_prefix='!', intents=intents)
+
 # URL to scrape for course information
 course_schedule_url = "https://web.csulb.edu/depts/enrollment/registration/class_schedule/Spring_2024/By_Subject/"
 room_bookings = []
@@ -26,6 +37,18 @@ WEEKDAY_ABBR = {
     5: "Sa",
     6: "Su"
 }
+
+async def send_message(user_id: int, message=None):
+    """
+    Sends a message to a specified user on Discord.
+
+    Args:
+        user_id (int): The Discord user ID to whom the message will be sent.
+        message (str, optional): The content of the message. Defaults to a generic message.
+    """
+    user = await bot.fetch_user(user_id)
+    message = message or "This was an attempt to send an unspecified message."
+    await user.send(message)
 
 def parse_sections_table(table):
     """
@@ -49,7 +72,8 @@ def parse_sections_table(table):
     for section in sections:
 
         start_time, end_time = parse_times(section['TIME'])
-
+        if section['DAYS'] == 'TBA' or section['DAYS'] == 'NA':
+            continue
         for day in parse_days(section['DAYS']):
             formatted_section = {
                 "Location": section['LOCATION'],
@@ -99,6 +123,9 @@ def parse_times(time_str):
     # Convert start and end times to 24-hour format
     start_time = time_to_24h(start_time_str)
     end_time = time_to_24h(end_time_str)
+
+    if start_time > end_time:
+        start_time -= 1200
 
     return (start_time, end_time)
 
@@ -180,13 +207,20 @@ def get_rooms(html):
                         room = Room(section['Location'], [(section['Day'], (section['Start'], section['End']))])
                         room_bookings.append(room)
             
-    
-async def main(filter = None):
+@bot.command()
+async def findroom(ctx, arg1 = None, *args):
+    filter = arg1
+    full = False
+
+    if "--v" in args or "verbose" in args or "all" in args: 
+        full = True
+
     rooms_data_file = "rooms_data.json"  # Name of the file to check/save to
     
     # Check if the rooms data file exists
     if not os.path.exists(rooms_data_file):
         print("Scraping rooms because no saved data file found...")
+        ctx.reply("Scraping rooms because no saved data file found... Please wait.")
         subjects_page = await get_page_html(course_schedule_url)
         subjects = get_subjects(subjects_page)
         for subject in subjects:
@@ -229,6 +263,8 @@ async def main(filter = None):
 
     formatted_open_rooms = {}
 
+    full_string = "All currently open rooms:\n\n"
+    
     for room in open_rooms:
         # get the next time the room will be in use:
         last_start = 2400
@@ -238,15 +274,27 @@ async def main(filter = None):
                     last_start = start
         
         formatted_open_rooms[room.location] = last_start
-        print(f"{room} until {datetime.strptime(str(last_start), '%H%M').strftime('%-I:%M%p').lower() if last_start != 2400 else 'the end of today'}")
+        full_string += f"{room} until {datetime.strptime(str(last_start), '%H%M').strftime('%-I:%M%p').lower() if last_start != 2400 else 'end of day'}\n"
 
+    if formatted_open_rooms == {}:
+        await ctx.reply("__**No open rooms found that meet your filters.**__")
+        return
     
     max_value = max(formatted_open_rooms.values())
 
     keys_with_max_value = [key for key, value in formatted_open_rooms.items() if value == max_value]
+    reply = f"Best rooms (open until {datetime.strptime(str(max_value), '%H%M').strftime('%-I:%M%p').lower() if max_value != 2400 else 'end of day'}):**\n\_\_\_\_\_\_\_\_\_\_\_\n\n" + "\n".join(keys_with_max_value) + "\n\_\_\_\_\_\_\_\_\_\_\_**\n\n"
+    if full:
+        reply += full_string
 
-    print(f"Best rooms (until {datetime.strptime(str(max_value), '%H%M').strftime('%-I:%M%p').lower() if max_value != 2400 else 'the end of today'}): ", keys_with_max_value)
-    
+    await ctx.reply(reply)
 
-# Start the monitoring loop
-asyncio.run(main('hc'))
+@bot.event
+async def on_ready():
+    """
+    Called when the bot is ready. Sets up the monitoring task.
+    """
+    print(f'{bot.user} is now running')
+    await send_message(TARGET_USER_ID, "Bot has been started.")
+
+bot.run(TOKEN)
