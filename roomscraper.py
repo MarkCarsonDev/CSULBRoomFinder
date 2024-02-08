@@ -100,26 +100,6 @@ def parse_times(time_str):
     elif 'pm' in end_time_str.lower() and 'pm' not in start_time_str.lower() and 'am' not in start_time_str.lower():
         start_time_str += 'pm'
 
-    # Define a helper function to convert time to 24-hour format
-    def time_to_24h(t_str):
-        t_str = t_str.lower()
-        is_pm = 'pm' in t_str
-        t_str = t_str.replace('am', '').replace('pm', '')
-
-        if ':' in t_str:
-            hours, minutes = t_str.split(':')
-        else:
-            hours, minutes = t_str, '00'
-
-        hours, minutes = int(hours), int(minutes)
-
-        if is_pm and hours < 12:
-            hours += 12
-        elif not is_pm and hours == 12:
-            hours = 0
-
-        return (hours * 100) + minutes
-
     # Convert start and end times to 24-hour format
     start_time = time_to_24h(start_time_str)
     end_time = time_to_24h(end_time_str)
@@ -128,6 +108,25 @@ def parse_times(time_str):
         start_time -= 1200
 
     return (start_time, end_time)
+
+def time_to_24h(t_str):
+    t_str = t_str.lower()
+    is_pm = 'pm' in t_str
+    t_str = t_str.replace('am', '').replace('pm', '')
+
+    if ':' in t_str:
+        hours, minutes = t_str.split(':')
+    else:
+        hours, minutes = t_str, '00'
+
+    hours, minutes = int(hours), int(minutes)
+
+    if is_pm and hours < 12:
+        hours += 12
+    elif not is_pm and hours == 12:
+        hours = 0
+
+    return (hours * 100) + minutes
 
 def parse_days(days_str):
     # split string by capital letters
@@ -215,6 +214,31 @@ async def findroom(ctx, arg1 = None, *args):
     if "--v" in args or "verbose" in args or "all" in args: 
         full = True
 
+    custom_time = None
+    if "--t" in args:
+        try:
+            custom_time = int(time_to_24h(args[args.index("--t") + 1]))
+        except:
+            await ctx.reply(f'Invalid time format. Please use 24-hour time format (e.g. 1200 for 12:00 PM).\nParsed to: {time_to_24h(args[args.index("--t") + 1])}')
+            return
+    
+    custom_day = None
+    if "--d" in args:
+        try:
+            custom_day = args[args.index("--d") + 1].strip()
+            print(f"-{custom_day}-")
+            if custom_day.upper() in WEEKDAY_ABBR.values():
+                custom_day = custom_day.upper()
+            else:
+                await ctx.reply(f"Invalid day format. Please use a valid day abbreviation: {WEEKDAY_ABBR.values()}.")
+                return
+        except Exception as e:
+            # print exception
+            await ctx.reply(f"Error: {e}")
+            return
+        
+
+
     rooms_data_file = "rooms_data.json"  # Name of the file to check/save to
     
     # Check if the rooms data file exists
@@ -245,11 +269,11 @@ async def findroom(ctx, arg1 = None, *args):
 
 
     # get current time in 24 hour format
-    current_time = int(time.strftime("%H%M"))
-    current_day = WEEKDAY_ABBR[datetime.now().weekday()]
+    current_time = custom_time or int(time.strftime("%H%M"))
+    current_day = custom_day or WEEKDAY_ABBR[datetime.now().weekday()]
 
 
-    print(f"Finding open rooms for {current_day} at {datetime.now().strftime('%-I:%M%p')}...")
+    print(f"Finding open rooms for {current_day} at {current_time}...")
     if filter:
         print(f"Filtering for locations containing '{filter.upper()}'...")
     open_rooms = []
@@ -274,7 +298,7 @@ async def findroom(ctx, arg1 = None, *args):
                     last_start = start
         
         formatted_open_rooms[room.location] = last_start
-        full_string += f"{room} until {datetime.strptime(str(last_start), '%H%M').strftime('%-I:%M%p').lower() if last_start != 2400 else 'end of day'}\n"
+        full_string += f"{room} until __{datetime.strptime(str(last_start), '%H%M').strftime('%-I:%M%p').lower() if last_start != 2400 else 'end of the day'}__\n"
 
     if formatted_open_rooms == {}:
         await ctx.reply("__**No open rooms found that meet your filters.**__")
@@ -283,9 +307,13 @@ async def findroom(ctx, arg1 = None, *args):
     max_value = max(formatted_open_rooms.values())
 
     keys_with_max_value = [key for key, value in formatted_open_rooms.items() if value == max_value]
-    reply = f"Best rooms (open until {datetime.strptime(str(max_value), '%H%M').strftime('%-I:%M%p').lower() if max_value != 2400 else 'end of day'}):**\n\_\_\_\_\_\_\_\_\_\_\_\n\n" + "\n".join(keys_with_max_value) + "\n\_\_\_\_\_\_\_\_\_\_\_**\n\n"
+    reply = f"Best rooms (open until __{datetime.strptime(str(max_value), '%H%M').strftime('%-I:%M%p').lower() if max_value != 2400 else 'end of the day'}__):**\n\_\_\_\_\_\_\_\_\_\_\_\n\n" + "\n".join(keys_with_max_value) + "\n\_\_\_\_\_\_\_\_\_\_\_**\n\n"
+    
     if full:
         reply += full_string
+
+    if custom_day or custom_time:
+        reply += f"\n\n(Filtered by `--d {current_day} --t {current_time}`)"
 
     await ctx.reply(reply)
 
